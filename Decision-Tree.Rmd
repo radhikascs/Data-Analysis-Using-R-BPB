@@ -1,0 +1,443 @@
+---
+title: "Predicting Employee Attrition-Classification Problem"
+author: "Himadri Sardana"
+output:
+  html_document: default
+  html_notebook: default
+---
+```{r include=FALSE}
+# Running required libraries
+library(factoextra)
+library(xlsx) 
+library(tidyverse)
+library(class)
+library(gmodels)
+library(caret)
+library(e1071)
+library(psych)
+library(rpart)
+library(corrgram) 
+library(kernlab) 
+library(FactoMineR)
+library(rpart.plot)
+library(party)
+library(EMCluster)
+library(ROCR)
+library(pROC)
+library(mice)
+library(randomForest)
+library(C50)
+library(gridExtra)
+```
+
+## Data Acquisition
+[IBM Watson Dataset](https://www.ibm.com/communities/analytics/watson-analytics-blog/hr-employee-attrition/)
+
+[Project Rubric](https://docs.google.com/spreadsheets/d/1K39kwQLs9BxaXOlRhJYsLeh9nyNfcmbxkBcrV9wcK3w/edit#gid=0)
+
+[Youtube Video Link](https://youtu.be/bmUIbARLa-4)
+
+```{r}
+# Reading xlsx dataset
+employee <- read.xlsx("WA_Fn-UseC_-HR-Employee-Attrition.xlsx", sheetIndex = 1, header = T)
+# saving a copy of dataset
+employee1 <- employee
+```
+
+## Data Exploration
+```{r}
+# Looking at a quick summary of all the features
+summary(employee)
+```
+
+```{r}
+# Looking at structure of all the features
+str(employee)
+```
+
+*part a)- exploratory data plots*
+```{r}
+set.seed(1) # setting seed for reproducibility
+# Simplified parallel coordinate plot
+employee[sapply(employee, is.factor)] <- data.matrix(employee[sapply(employee, is.factor)]) #factorised features
+plotmd(employee, class=NULL,main="Plot showing multivariate data for clusters as the parallel coordinates ") #the plot 
+```
+```{r}
+# Histogram with normal curve for monthly income
+# Histogram
+histogram.curve <- hist(employee$MonthlyIncome, breaks = 10, col = "purple", xlab = "Monthly Income", main = "Histogram with Normal Curve")
+# Adding normal curve to the histogram
+xfit <- seq(min(employee[,19]), max(employee[,19]), length=40)
+yfit <- dnorm(xfit, mean=mean(employee[,19]), sd=sd((employee[,19])))
+yfit <- yfit*diff(histogram.curve$mids[1:2])*length(employee$MonthlyIncome)
+lines(xfit, yfit, col ="black", lwd=2)
+# plot shows negatively skewed data
+```
+```{r}
+# Plot showing relationships between employees leaving the company with respect to monthly income, percent salary hike and job level
+pl <- ggplot(employee1, aes(x=MonthlyIncome, y=PercentSalaryHike)) + geom_point(shape=2)+ ggtitle("Effect of Job Level(1-5), PercentSalaryHike and MonthlyIncome on Attrition(Y/N)")
+pl + facet_grid(Attrition ~ JobLevel)
+
+# as expected employees with low job level, less percent salary  hike and  low monthly income have the most attritions.
+```
+
+*part b)- detection of outlier*
+```{r}
+# Calculating cook's distance to detect outliers
+set.seed(1)
+mod <- lm(Attrition ~ ., data=employee) #model
+cooksd <- cooks.distance(mod) # distance
+# Plotting cook's distance
+plot(cooksd, pch="*", cex=2, main="Outliers using Cooks Distance") %>% #plot
+abline(h = 5*mean(cooksd, na.rm=T), col="black") %>%  # cut-off line
+text(x=1:length(cooksd)+1, y=cooksd, labels=ifelse(cooksd>5*mean(cooksd, na.rm=T),names(cooksd),""), col="red")  #labels
+```
+```{r}
+# Row numbers with outliers
+out.rows <- as.numeric(names(cooksd)[(cooksd > 5*mean(cooksd, na.rm=T))]) 
+out.rows
+```
+```{r}
+# Removing outlier rows as they create unwanted significant associated
+employee <- employee[-out.rows,]
+employee1<-employee1[-out.rows,]
+```
+
+*part c) correlation/collinearity analysis*
+```{r}
+# Correlation
+# removing columns 9,22,27 because they have same data so will make correlation NA
+corr<-cor(employee[,-c(9,22,27)])
+corr
+```
+```{r}
+# Collinearity
+corrgram(corr,order=TRUE,lower.panel=panel.shade,upper.panel=panel.pie)
+# The plot shows that there are lot of irrelevant features so they need to be removed before building the classification models
+```
+
+```{r}
+# Removing features with same data in all the cases
+employee1<-employee1[-c(9,22,27)] 
+employee2<-employee1
+```
+## Data Cleaning & Shaping
+
+*part a)-Imputation missing values*
+```{r}
+sum(is.na(employee2))
+# no NAs in dataset`
+```
+```{r}
+# Creating 117 random NAs
+set.seed(1)
+n_missing<-117
+# selecting random sampling
+y<-data.frame(row=sample(nrow(employee2),size=n_missing,replace = T),col=sample(ncol(employee2),size = n_missing,replace = T))
+# replacing with NAs
+employee2[as.matrix(y)]<-NA
+sum(is.na(employee2)) #verifying
+```
+```{r}
+# Looking at the pattern of NAs generated in dataset
+md.pattern(employee2)
+```
+```{r include=FALSE}
+# Imputing NAs by random forest prediction
+set.seed(1)
+Mod <-mice(employee2[, !names(employee2) %in% ""], method="rf")
+employee2<-complete(Mod)
+```
+```{r}
+# verifying for NAs once again
+sum(is.na(employee2)) 
+# Note: See section named 'other' for comparing accuracies with imputed dataset vs original dataset at the bottom of the code/page.
+```
+*part b) and c) Dummy codes and Normalization/Standardization of features*
+```{r}
+# Dummy codes for all the columns(predictors) except Attrition column (response)
+set.seed(1)
+employee1[,-2][sapply(employee1[,-2], is.factor)] <- data.matrix(employee1[,-2][sapply(employee1[,-2], is.factor)])
+# Normalization
+normalize <- function(x) {
+  return ((x - min(x)) / (max(x) - min(x))) } #normalize fun min-max
+employee.n <- as.data.frame(lapply(employee1[,-2], normalize)) 
+# combining response and predictors
+employee.n<-cbind(employee1$Attrition, employee.n)
+#Verifying one of the features
+summary(employee.n$Age)
+```
+*part d)- Feature engineering-PCA*
+```{r}
+# Principal Component Analysis
+pca = prcomp(employee.n[2:32], scale. = TRUE)
+```
+```{r}
+# Sqrt of eigenvalues
+pca$sdev
+```
+```{r}
+# Scree plot
+fviz_eig(pca)
+# Note that the elbow is at 2 dimensions
+# So, reducing dataset to 2 dimensions from 10
+```
+```{r}
+# Circle of correlations
+fviz_pca_var(pca,col.var = "contrib", gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),repel = TRUE)
+```
+```{r}
+# Looking at rotation (or loadings in some methods) values to select features
+# for dimension 1
+pca$rotation[,1][order(pca$rotation[,1])] # selecting top 5 and bottom 5 of the list to ensure contributions in opposite directions, also circle of correlations can be used to verify this.
+```
+```{r}
+# for dimension 2
+pca$rotation[,2][order(pca$rotation[,2])] # selecting top 5 and bottom 5 of these 
+# now union of features selected from dimensions 1 and 2 can be used to reduce overall number of features in dataset
+```
+
+*part e) - new derived features*
+```{r}
+# We saw from PCA that education level itself doesn't conribute itself, but is an important criteria in people analytics
+# To include this, calculating monthly income per degree or income per education level
+set.seed(1)
+IncomePerDegree<-data.frame(employee1$MonthlyIncome/employee1$Education)
+# Again, normalizing this new derived feature
+normalize <- function(x) {
+  return ((x - min(x)) / (max(x) - min(x))) }
+IncomePerDegree <- as.data.frame(lapply(IncomePerDegree, normalize))
+IncomePerDegree <- setNames(IncomePerDegree, "Incomeperdegree")
+```
+```{r}
+# Removing redudant and insignificant variables from the results of pca and adding derived feature
+employee.n<-employee.n[, -c(3,4,5,6,7,8,13,16,19,21,22,23,24,25,27,28,31)]
+employee.n<-cbind(employee.n,IncomePerDegree )
+```
+## Model Construction & Evaluation
+
+*Part a) creation of training & validation datasets*
+```{r}
+# dividing into 3/4 parts as the dataset is noisy
+set.seed(1)
+index <- createDataPartition(employee.n[,1], p=0.75, list = FALSE)
+employee_train <- employee.n[index,]
+employee_test <- employee.n[-index,]
+```
+*Part b),c),d),e)*
+
+**Model 1-KNN**
+```{r}
+# Holdout method
+trctr <- trainControl(method = "none")# tune parameter #no folds
+model_knn <- train(employee_train[, 2:16], employee_train[, 1], method='knn', trControl = trctr)
+pred_knn<-predict(object=model_knn,employee_test[,2:16]) #predictions
+table(pred_knn) 
+```
+```{r}
+# Accuracy (Holdout method) 
+confusionMatrix(pred_knn, employee_test[,1]) # Accuracy=86.57%
+#the dataset is a numerical one so no need to RMSE and similar methods for evaluating the fit of model
+```
+```{r}
+# knn with 10 fold cross validation
+trctrl <- trainControl(method = "repeatedcv", number = 10, repeats = 3)# tune control
+knn_fit <- train(`employee1$Attrition` ~ ., data = employee_train, method = "knn", trControl=trctrl, tuneLength = 10)
+pred_knn_cv<-predict(object=knn_fit,employee_test[,-1])# predictions
+table(pred_knn_cv)
+```
+```{r}
+# Accuracy (CV method)
+confusionMatrix(pred_knn_cv, employee_test[,1]) # Accuracy = 88.29%
+# repeated cv sampling instead of no sampling with k=15, number=10, repeats=3 increases accuracy from 86.57% to 88.29%.
+```
+
+**Model 2-svm** 
+```{r}
+# Holdout method
+set.seed(1)
+model_svm <- ksvm( employee_train[,1]  ~ ., data = employee_train[,2:16], kernel = "vanilladot", cross=0) # model
+pred_svm <- predict(model_svm, employee_test[,2:16]) # predictions
+table(pred_svm)
+```
+```{r}
+# Accuracy (Holdout method)
+confusionMatrix(pred_svm, employee_test[,1]) 
+# I tried changing the inner product in feature space between the two vector arguments by using different kernals
+# vanilladot,rbfdot,ploydot,laplacedot, anovadot gave accuracies of 88%,
+# splinedot of 80.86%
+# tanhdot and besseldot of 77.14% 
+```
+```{r}
+# Accuracy (CV)
+model_svm_cv<- ksvm( `employee1$Attrition`  ~ ., data = employee_train, kernel = "vanilladot", cross=10)
+pred_svm_cv <- predict(model_svm_cv, employee_test[,2:16])
+confusionMatrix(pred_svm_cv, employee_test[,1])
+# This gives accuracy same as holdout method; 88%
+```
+**Model 3- Decision Tree**
+```{r}
+# rpart
+set.seed(1)
+rtree_fit <- rpart(employee_train[,1] ~ ., employee_train[,2:16], method='class') 
+rpart.plot(rtree_fit)
+```
+```{r}
+pred_rtree <- predict(rtree_fit, employee_test[,2:16], type= 'class')
+confusionMatrix(pred_rtree, employee_test[,1]) #88.57%
+```
+```{r}
+# printing cp table
+printcp(rtree_fit)
+```
+```{r}
+# plotting cross-validation results
+plotcp(rtree_fit)
+# the plot shows that dividing trees into more nodes increases relative validation errors
+# for this reason, this model is not so good
+```
+```{r}
+# Decision tree using C50 (no bias like rpart)
+# also, this method does not require pruning
+set.seed(1)
+fit <- C5.0(employee_train[,2:16], employee_train[,1], trials=10)# boosting by adding trials =10
+# I tried changing trials and found out 10 gives the best accuracy
+summary(fit)
+#print(fit)
+#plot(fit)
+```
+```{r}
+pred_c.50tree <- predict(fit, employee_test[,2:16])# predictions
+confusionMatrix(pred_c.50tree, employee_test[,1]) # 88.57% 
+```
+
+**Model 4-Random Forest**
+```{r}
+set.seed(1)
+model_rf <- randomForest(employee_train[,1] ~ ., data = employee_train[,2:16], importance = TRUE) #model
+```
+
+```{r}
+# Tuning; found mtry=4 and ntree=500 gives best fit
+model_rf2 <- randomForest(employee_train[,1] ~ ., data = employee_train[,2:16], ntree = 500, mtry = 4, importance = TRUE)
+```
+```{r}
+# predictions and accuracy
+pred_rf2 <- predict(model_rf2, employee_test[,2:16], type = "class")
+confusionMatrix(pred_rf2, employee_test[,1]) # 88.29%
+```
+```{r}
+# Cross Validation
+model_rf_cv<-rfcv(employee_train[,2:16], employee_train[,1], cv.fold=10)
+model_rf_cv$error.cv
+# accuracy using 15 features = 88.32%
+```
+
+*part f) comparison of models*
+```{r} 
+# Tabulating accuracies
+Model <- c('Decision Tree-C5.0','Random Forest','kNN','SVM-vanilladot')
+Accuracy_percent <- c(88.57,88.32,88.29,88.00)
+mytable<- data.frame(Model, Accuracy_percent)
+qplot(1:10, 1:10, geom = "blank") + theme(line = element_blank(), text = element_blank()) + annotation_custom(grob = tableGrob(mytable)) 
+# Decision Tree, followed by random forest gave better accuracies
+```
+```{r}
+set.seed(1)
+# Plotting the ROC curves for the four models
+plot(roc(employee_test[,1], as.numeric(pred_knn_cv)), col='red')
+par(new=TRUE)
+plot(roc(employee_test[,1], as.numeric(pred_svm_cv)), col='green')
+par(new=TRUE)
+plot(roc(employee_test[,1], as.numeric(pred_c.50tree)), col='blue')
+par(new=TRUE)
+plot(roc(employee_test[,1], as.numeric(pred_rf2)), col='pink')
+legend("bottomright", c("knn", "svm", "decision tree", "random forest"), fill=c('red','green','blue','pink'), title="Model")
+# As expected # Decision Tree, followed by random forest gave better ROC curves
+```
+
+*part g) Interpretation of results/prediction with interval*
+```{r}
+# Using knn model to predict Employee Attrition for a new test case
+t1<-c(25,2063,2,1,72,2,5,4,9992,4,8,15,3,2,5000) #test case
+data_new<-employee.n[,-1] # removing the response variable from dataset
+data_new[nrow(employee.n)+1,] <- t1 # adding the test case to normalized dataset
+```
+```{r}
+# Normalizing new testrow
+set.seed(1)
+normalize <- function(x) {
+  return ((x - min(x)) / (max(x) - min(x))) }
+data_new.n <- as.data.frame(lapply(data_new, normalize))
+# saving normalized test case
+t1<-data_new.n[1404,]
+# train test and labels 
+data_new.train <- data.frame(data_new.n[1:1403,])
+data_new.test1 <- data.frame(data_new.n[1404,])
+data_labels <- employee.n[,1]
+# model
+test_pred_1 <- knn(train = data_new.train, test =data_new.test1 , cl = data_labels, k=15)
+# prediction
+test_pred_1 # 86.57 accurate in 95% CI
+```
+
+*part h) construction of stacked ensemble model*
+```{r}
+set.seed(1)
+# Combining prediction from four models
+predCom <- data.frame(pred_knn_cv, pred_rf2,pred_svm,pred_c.50tree, y= employee_test[,1],stringsAsFactors = F)
+# Training the ensemble model using random forest
+modelStack <- train(y ~ ., data = predCom, method = "rf")
+predStack<-predict(modelStack, employee_test[,2:16]) # predictions
+confusionMatrix(predStack, employee_test[,1])
+# Accuracy of stacked ensemble model is 88.57%; which is same as accuracy of decision tree
+```
+
+# Other
+```{r}
+set.seed(1)
+# iterating over dataset with imputed missing values to compare accuracies
+employee2[,-2][sapply(employee2[,-2], is.factor)] <- data.matrix(employee2[,-2][sapply(employee2[,-2], is.factor)])
+# Normalization as usual
+normalize <- function(x) {
+  return ((x - min(x)) / (max(x) - min(x))) }
+employee.n.m <- as.data.frame(lapply(employee2[,-2], normalize))
+employee.n.m<-cbind(employee2$Attrition, employee.n.m)
+# adding the new derived column
+IncomePerDegree<-data.frame(employee2$MonthlyIncome/employee2$Education)
+normalize <- function(x) {
+  return ((x - min(x)) / (max(x) - min(x))) }
+IncomePerDegree <- as.data.frame(lapply(IncomePerDegree, normalize))
+IncomePerDegree <- setNames(IncomePerDegree, "Incomeperdegree")
+# removing redudant and insignificant variables from results of pca and adding derived feature
+employee.n.m<-employee.n.m[, -c(3,4,5,6,7,8,13,16,19,21,22,23,24,25,27,28,31)]
+employee.n.m<-cbind(employee.n.m,IncomePerDegree )
+# splitting up train and test datasets
+index <- createDataPartition(employee.n.m[,1], p=0.75, list = FALSE)
+employee_train_m <- employee.n.m[index,]
+employee_test_m <- employee.n.m[-index,]
+# verifying model 1 - knn
+trctr.m <- trainControl(method = "repeatedcv", number = 10, repeats = 3)# tune control
+knn_fit_m <- train(`employee2$Attrition` ~ ., data = employee_train_m, method = "knn", trControl=trctr.m, tuneLength = 10)
+pred_knn.m<-predict(object=knn_fit_m,employee_test_m[,-1])# predictions
+confusionMatrix(pred_knn.m, employee_test_m[,1])
+# Accuracy remains almost the same.
+# Although for original dataset
+#Prediction 
+            #No Yes
+       #No  306  39
+       #Yes   2   3
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
